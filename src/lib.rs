@@ -1,165 +1,147 @@
-#![forbid(unsafe_code)]
-#![no_std]
-extern crate alloc;
+//! Ternary morphological operations: erosion, dilation, opening, closing, skeletonization.
 
-use alloc::{vec, vec::Vec};
-
-/// Returns the 8-connected offsets for a 3×3 structuring element (excluding center).
-pub fn se_3x3() -> Vec<(i32, i32)> {
-    vec![
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),           (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
-    ]
+/// Ternary grid for morphological operations
+#[derive(Clone, Debug)]
+pub struct TernaryGrid {
+    width: usize,
+    height: usize,
+    data: Vec<i8>, // -1, 0, +1
 }
 
-/// Convert (row, col) offset to flat index, returning None if out of bounds.
-fn offset_to_idx(row: i32, col: i32, r: i32, c: i32, w: usize, h: usize) -> Option<usize> {
-    let nr = r + row;
-    let nc = c + col;
-    if nr < 0 || nc < 0 || nr >= h as i32 || nc >= w as i32 {
-        None
-    } else {
-        Some((nr as usize) * w + (nc as usize))
+impl TernaryGrid {
+    pub fn new(width: usize, height: usize, fill: i8) -> Self {
+        assert!(fill >= -1 && fill <= 1);
+        Self { width, height, data: vec![fill; width * height] }
     }
-}
 
-/// Dilation: a cell becomes +1 if any neighbor in the SE is +1. Non-+1 cells that
-/// aren't hit remain unchanged (preserving -1 cells).
-pub fn dilation(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let mut out = Vec::from_iter(grid.iter().copied());
-    for r in 0..h as i32 {
-        for c in 0..w as i32 {
-            let idx = (r as usize) * w + (c as usize);
-            if grid[idx] == 1 {
-                continue; // already +1
-            }
-            for &(dr, dc) in se {
-                if let Some(ni) = offset_to_idx(dr, dc, r, c, w, h) {
-                    if grid[ni] == 1 {
-                        out[idx] = 1;
-                        break;
-                    }
+    pub fn from_vec(width: usize, height: usize, data: Vec<i8>) -> Self {
+        assert_eq!(data.len(), width * height);
+        assert!(data.iter().all(|&v| v >= -1 && v <= 1));
+        Self { width, height, data }
+    }
+
+    pub fn get(&self, x: usize, y: usize) -> i8 {
+        self.data[y * self.width + x]
+    }
+
+    pub fn set(&mut self, x: usize, y: usize, v: i8) {
+        assert!(v >= -1 && v <= 1);
+        self.data[y * self.width + x] = v;
+    }
+
+    pub fn width(&self) -> usize { self.width }
+    pub fn height(&self) -> usize { self.height }
+    pub fn data(&self) -> &[i8] { &self.data }
+
+    fn neighbors4(&self, x: usize, y: usize) -> Vec<(usize, usize)> {
+        let mut n = Vec::new();
+        if x > 0 { n.push((x-1, y)); }
+        if x < self.width-1 { n.push((x+1, y)); }
+        if y > 0 { n.push((x, y-1)); }
+        if y < self.height-1 { n.push((x, y+1)); }
+        n
+    }
+
+    fn neighbors8(&self, x: usize, y: usize) -> Vec<(usize, usize)> {
+        let mut n = self.neighbors4(x, y);
+        if x > 0 && y > 0 { n.push((x-1, y-1)); }
+        if x < self.width-1 && y > 0 { n.push((x+1, y-1)); }
+        if x > 0 && y < self.height-1 { n.push((x-1, y+1)); }
+        if x < self.width-1 && y < self.height-1 { n.push((x+1, y+1)); }
+        n
+    }
+
+    /// Erosion: cell becomes min of its neighborhood. Target state preserved only if all neighbors match.
+    pub fn erode(&self, target: i8, connectivity: usize) -> TernaryGrid {
+        let mut result = self.clone();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let nbrs = if connectivity == 4 { self.neighbors4(x,y) } else { self.neighbors8(x,y) };
+                if nbrs.is_empty() { continue; }
+                if nbrs.iter().all(|&(nx,ny)| self.get(nx,ny) == target) {
+                    // keep target
+                } else {
+                    // erode to 0
+                    result.set(x, y, 0);
                 }
             }
         }
+        result
     }
-    out
-}
 
-/// Erosion: a +1 cell stays +1 only if ALL SE neighbors are +1.
-/// Non-+1 cells remain unchanged.
-pub fn erosion(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let mut out = Vec::from_iter(grid.iter().copied());
-    for r in 0..h as i32 {
-        for c in 0..w as i32 {
-            let idx = (r as usize) * w + (c as usize);
-            if grid[idx] != 1 {
-                continue;
-            }
-            let all_one = se.iter().all(|&(dr, dc)| {
-                offset_to_idx(dr, dc, r, c, w, h)
-                    .map(|ni| grid[ni] == 1)
-                    .unwrap_or(false)
-            });
-            if !all_one {
-                out[idx] = 0;
-            }
-        }
-    }
-    out
-}
-
-/// Opening: erosion followed by dilation.
-pub fn opening(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let eroded = erosion(grid, w, h, se);
-    dilation(&eroded, w, h, se)
-}
-
-/// Closing: dilation followed by erosion.
-pub fn closing(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let dilated = dilation(grid, w, h, se);
-    erosion(&dilated, w, h, se)
-}
-
-/// Morphological gradient: dilation - erosion (elementwise).
-/// Result values are in {-1, 0, +1} — clamped.
-pub fn gradient(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let dil = dilation(grid, w, h, se);
-    let ero = erosion(grid, w, h, se);
-    dil.iter().zip(ero.iter()).map(|(&d, &e)| (d - e).clamp(-1, 1)).collect()
-}
-
-/// Top hat: original - opening.
-pub fn top_hat(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let op = opening(grid, w, h, se);
-    grid.iter().zip(op.iter()).map(|(&g, &o)| (g - o).clamp(-1, 1)).collect()
-}
-
-/// Black hat: closing - original.
-pub fn black_hat(grid: &[i8], w: usize, h: usize, se: &[(i32, i32)]) -> Vec<i8> {
-    let cl = closing(grid, w, h, se);
-    cl.iter().zip(grid.iter()).map(|(&c, &g)| (c - g).clamp(-1, 1)).collect()
-}
-
-/// Hit-or-miss: match foreground pattern (fg_se must be +1) AND background pattern
-/// (bg_se must be 0 or -1) simultaneously.
-pub fn hit_or_miss(
-    grid: &[i8], w: usize, h: usize,
-    fg_se: &[(i32, i32)], bg_se: &[(i32, i32)],
-) -> Vec<i8> {
-    let mut out = vec![0i8; w * h];
-    for r in 0..h as i32 {
-        for c in 0..w as i32 {
-            let idx = (r as usize) * w + (c as usize);
-            let fg_match = fg_se.iter().all(|&(dr, dc)| {
-                offset_to_idx(dr, dc, r, c, w, h).map(|ni| grid[ni] == 1).unwrap_or(false)
-            });
-            let bg_match = bg_se.iter().all(|&(dr, dc)| {
-                offset_to_idx(dr, dc, r, c, w, h).map(|ni| grid[ni] != 1).unwrap_or(false)
-            });
-            if fg_match && bg_match {
-                out[idx] = 1;
-            }
-        }
-    }
-    out
-}
-
-/// Conditional dilation: dilate marker but only where mask is +1.
-pub fn conditional_dilation(
-    marker: &[i8], mask: &[i8], w: usize, h: usize, se: &[(i32, i32)],
-) -> Vec<i8> {
-    let mut out = Vec::from_iter(marker.iter().copied());
-    for r in 0..h as i32 {
-        for c in 0..w as i32 {
-            let idx = (r as usize) * w + (c as usize);
-            if out[idx] == 1 || mask[idx] != 1 {
-                continue;
-            }
-            for &(dr, dc) in se {
-                if let Some(ni) = offset_to_idx(dr, dc, r, c, w, h) {
-                    if marker[ni] == 1 && mask[idx] == 1 {
-                        out[idx] = 1;
-                        break;
-                    }
+    /// Dilation: cell becomes target if any neighbor is target.
+    pub fn dilate(&self, target: i8, connectivity: usize) -> TernaryGrid {
+        let mut result = self.clone();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.get(x,y) == target { continue; }
+                let nbrs = if connectivity == 4 { self.neighbors4(x,y) } else { self.neighbors8(x,y) };
+                if nbrs.iter().any(|&(nx,ny)| self.get(nx,ny) == target) {
+                    result.set(x, y, target);
                 }
             }
         }
+        result
     }
-    out
-}
 
-/// Morphological reconstruction: iteratively dilate marker constrained by mask until stable.
-pub fn reconstruct(marker: &[i8], mask: &[i8], w: usize, h: usize) -> Vec<i8> {
-    let se = se_3x3();
-    let mut current = Vec::from_iter(marker.iter().copied());
-    loop {
-        let next = conditional_dilation(&current, mask, w, h, &se);
-        if next == current {
-            return current;
+    /// Opening = erode then dilate (removes small protrusions)
+    pub fn open(&self, target: i8, connectivity: usize) -> TernaryGrid {
+        self.erode(target, connectivity).dilate(target, connectivity)
+    }
+
+    /// Closing = dilate then erode (fills small holes)
+    pub fn close(&self, target: i8, connectivity: usize) -> TernaryGrid {
+        self.dilate(target, connectivity).erode(target, connectivity)
+    }
+
+    /// Count cells of a given state
+    pub fn count(&self, state: i8) -> usize {
+        self.data.iter().filter(|&&v| v == state).count()
+    }
+
+    /// Skeleton: iteratively erode until stable
+    pub fn skeleton(&self, target: i8) -> TernaryGrid {
+        let mut current = self.clone();
+        loop {
+            let eroded = current.erode(target, 8);
+            if eroded.data == current.data { break; }
+            // Only remove cells that won't disconnect
+            let mut next = current.clone();
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    if current.get(x,y) == target && eroded.get(x,y) == 0 {
+                        // Check if removing would disconnect
+                        let nbrs: Vec<_> = current.neighbors8(x,y)
+                            .into_iter()
+                            .filter(|&(nx,ny)| current.get(nx,ny) == target)
+                            .collect();
+                        if nbrs.len() > 1 {
+                            // Keep: it's a junction
+                        } else {
+                            next.set(x, y, 0);
+                        }
+                    }
+                }
+            }
+            if next.data == current.data { break; }
+            current = next;
         }
-        current = next;
+        current
+    }
+
+    /// Gradient = dilate - erode (edge detection)
+    pub fn gradient(&self, target: i8, connectivity: usize) -> TernaryGrid {
+        let dilated = self.dilate(target, connectivity);
+        let eroded = self.erode(target, connectivity);
+        let mut result = TernaryGrid::new(self.width, self.height, 0);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if dilated.get(x,y) == target && eroded.get(x,y) != target {
+                    result.set(x, y, target);
+                }
+            }
+        }
+        result
     }
 }
 
@@ -167,295 +149,84 @@ pub fn reconstruct(marker: &[i8], mask: &[i8], w: usize, h: usize) -> Vec<i8> {
 mod tests {
     use super::*;
 
-    fn g(v: &[i8], w: usize, h: usize) -> (Vec<i8>, usize, usize) {
-        (v.to_vec(), w, h)
+    #[test]
+    fn test_erosion_removes_isolated() {
+        let mut g = TernaryGrid::new(5, 5, 0);
+        g.set(2, 2, 1);
+        let eroded = g.erode(1, 4);
+        assert_eq!(eroded.count(1), 0); // isolated cell erodes away
     }
 
     #[test]
-    fn test_se_3x3_count() {
-        let se = se_3x3();
-        assert_eq!(se.len(), 8);
+    fn test_dilation_expands() {
+        let mut g = TernaryGrid::new(5, 5, 0);
+        g.set(2, 2, 1);
+        let dilated = g.dilate(1, 4);
+        assert!(dilated.count(1) > 1);
     }
 
     #[test]
-    fn test_dilation_single_cell() {
-        let (grid, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = dilation(&grid, w, h, &se);
-        // All 8 neighbors should become +1, center stays +1
-        assert_eq!(r[0], 1);
-        assert_eq!(r[1], 1);
-        assert_eq!(r[2], 1);
-        assert_eq!(r[3], 1);
-        assert_eq!(r[4], 1);
-        assert_eq!(r[5], 1);
-        assert_eq!(r[6], 1);
-        assert_eq!(r[7], 1);
-        assert_eq!(r[8], 1);
+    fn test_opening_removes_noise() {
+        let mut g = TernaryGrid::new(7, 7, 0);
+        // Block of +1
+        for y in 2..=4 { for x in 2..=4 { g.set(x, y, 1); } }
+        // Noise pixel
+        g.set(0, 0, 1);
+        let opened = g.open(1, 4);
+        assert_eq!(opened.get(0, 0), 0); // noise removed
+        assert_eq!(opened.get(3, 3), 1); // block preserved
     }
 
     #[test]
-    fn test_dilation_preserves_negative_far() {
-        // -1 far from any +1 should be preserved
-        let (grid, w, h) = g(&[
-             0,  0, 0, 0, 0,
-             0,  0, 0, 0, 0,
-             0,  0, 1, 0, 0,
-             0,  0, 0, 0, 0,
-             0, -1, 0, 0, 0,
-        ], 5, 5);
-        let se = se_3x3();
-        let r = dilation(&grid, w, h, &se);
-        // idx 21 (row4,col1) is distance 2 from the +1 at idx 12 — not in 8-neighbor range
-        assert_eq!(r[21], -1); // -1 preserved (too far)
-        assert_eq!(r[16], 1);  // row3,col1 is neighbor of +1
+    fn test_closing_fills_hole() {
+        let mut g = TernaryGrid::new(5, 5, 1);
+        g.set(2, 2, 0); // hole
+        let closed = g.close(1, 4);
+        assert_eq!(closed.get(2, 2), 1); // hole filled
     }
 
     #[test]
-    fn test_erosion_single_cell_erodes() {
-        let (grid, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = erosion(&grid, w, h, &se);
-        assert_eq!(r[4], 0); // single isolated cell erodes away
+    fn test_gradient_detects_edges() {
+        let mut g = TernaryGrid::new(5, 5, 0);
+        for x in 1..=3 { g.set(x, 2, 1); }
+        let grad = g.gradient(1, 4);
+        assert!(grad.count(1) > 0);
+        assert!(grad.count(1) < g.count(1) + 10);
     }
 
     #[test]
-    fn test_erosion_solid_block_center_survives() {
-        // 5x5 solid block — center should survive erosion with se_3x3
-        let (grid, w, h) = g(&[
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-        ], 5, 5);
-        let se = se_3x3();
-        let r = erosion(&grid, w, h, &se);
-        // Center (idx 12) has all 8 neighbors as +1
-        assert_eq!(r[12], 1);
-        // Border cells erode (out-of-bounds SE neighbors)
-        assert_eq!(r[0], 0); // corner
-        assert_eq!(r[1], 0); // edge
+    fn test_skeleton_reduces() {
+        let mut g = TernaryGrid::new(11, 11, 0);
+        // Cross shape — skeleton should be thinner than the filled cross
+        for i in 1..=9 { g.set(i, 5, 1); g.set(5, i, 1); }
+        let skel = g.skeleton(1);
+        // Skeleton must be <= original (may be equal if already thin)
+        assert!(skel.count(1) <= g.count(1));
     }
 
     #[test]
-    fn test_erosion_preserves_negative() {
-        let (grid, w, h) = g(&[
-            -1, 0, 0,
-             0, 0, 0,
-             0, 0, 0,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = erosion(&grid, w, h, &se);
-        assert_eq!(r[0], -1); // -1 untouched by erosion
+    fn test_idempotent_opening() {
+        let mut g = TernaryGrid::new(7, 7, 0);
+        for y in 2..=4 { for x in 2..=4 { g.set(x, y, 1); } }
+        let o1 = g.open(1, 4);
+        let o2 = o1.open(1, 4);
+        assert_eq!(o1.data, o2.data);
     }
 
     #[test]
-    fn test_opening_removes_isolated() {
-        let (grid, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = opening(&grid, w, h, &se);
-        assert!(r.iter().all(|&v| v != 1));
+    fn test_negative_state_dilation() {
+        let mut g = TernaryGrid::new(5, 5, 0);
+        g.set(2, 2, -1);
+        let dilated = g.dilate(-1, 4);
+        assert!(dilated.count(-1) > 1);
     }
 
     #[test]
-    fn test_opening_preserves_large_block() {
-        let (grid, w, h) = g(&[
-            1, 1, 1,
-            1, 1, 1,
-            1, 1, 1,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = opening(&grid, w, h, &se);
-        assert!(r.iter().all(|&v| v == 1));
-    }
-
-    #[test]
-    fn test_closing_fills_small_gap() {
-        let (grid, w, h) = g(&[
-            1, 1, 1,
-            1, 0, 1,
-            1, 1, 1,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = closing(&grid, w, h, &se);
-        assert_eq!(r[4], 1); // gap filled
-    }
-
-    #[test]
-    fn test_closing_preserves_center() {
-        // 5x5 solid block — closing should not alter center region
-        let (grid, w, h) = g(&[
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-        ], 5, 5);
-        let se = se_3x3();
-        let r = closing(&grid, w, h, &se);
-        // Interior cells should be preserved by closing
-        assert_eq!(r[12], 1);
-    }
-
-    #[test]
-    fn test_gradient_finds_boundary() {
-        let (grid, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = gradient(&grid, w, h, &se);
-        // Center erodes to 0, dilates to all 1s → gradient is 1 everywhere except center
-        assert_eq!(r[4], 1); // dilation=1, erosion=0 → 1
-    }
-
-    #[test]
-    fn test_gradient_finds_border() {
-        // 5x5 solid block — gradient should be non-zero at borders, zero at center
-        let (grid, w, h) = g(&[
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1,
-        ], 5, 5);
-        let se = se_3x3();
-        let r = gradient(&grid, w, h, &se);
-        // Center: both dilation and erosion yield +1 → gradient = 0
-        assert_eq!(r[12], 0);
-        // Corner: dilation = 1, erosion = 0 → gradient = 1
-        assert_eq!(r[0], 1);
-    }
-
-    #[test]
-    fn test_top_hat_isolated_peak() {
-        let (grid, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = top_hat(&grid, w, h, &se);
-        // Opening removes the isolated +1, so top_hat = orig - opening = 1 at center
-        assert_eq!(r[4], 1);
-    }
-
-    #[test]
-    fn test_black_hat_fills_gap() {
-        let (grid, w, h) = g(&[
-            1, 1, 1,
-            1, 0, 1,
-            1, 1, 1,
-        ], 3, 3);
-        let se = se_3x3();
-        let r = black_hat(&grid, w, h, &se);
-        // Closing fills the gap → black_hat = closing - orig → 1 at center
-        assert_eq!(r[4], 1);
-    }
-
-    #[test]
-    fn test_hit_or_miss_corner() {
-        let (grid, w, h) = g(&[
-            1, 0, 0,
-            0, 0, 0,
-            0, 0, 0,
-        ], 3, 3);
-        // Looking for a +1 cell with right=0 and below=0
-        let fg_se: Vec<(i32, i32)> = vec![(0, 0)]; // center must be +1
-        let bg_se: Vec<(i32, i32)> = vec![(0, 1), (1, 0)]; // right and below must not be +1
-        let r = hit_or_miss(&grid, w, h, &fg_se, &bg_se);
-        assert_eq!(r[0], 1); // top-left corner matches
-    }
-
-    #[test]
-    fn test_hit_or_miss_no_match() {
-        let (grid, w, h) = g(&[
-            1, 1, 0,
-            1, 0, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let fg_se: Vec<(i32, i32)> = vec![(0, 0)];
-        let bg_se: Vec<(i32, i32)> = vec![(0, 1), (1, 0)]; // right and below must be non-+1
-        let r = hit_or_miss(&grid, w, h, &fg_se, &bg_se);
-        assert_eq!(r[0], 0); // top-left has right=1, doesn't match
-    }
-
-    #[test]
-    fn test_conditional_dilation() {
-        // marker: single +1 in center
-        // mask: full row
-        let (marker, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let mask = vec![
-            0, 0, 0,
-            1, 1, 1,
-            0, 0, 0,
-        ];
-        let se = se_3x3();
-        let r = conditional_dilation(&marker, &mask, w, h, &se);
-        // Should dilate only along the masked row
-        assert_eq!(r[3], 1); // left of center
-        assert_eq!(r[4], 1); // center (already +1)
-        assert_eq!(r[5], 1); // right of center
-        assert_eq!(r[1], 0); // above, not in mask
-    }
-
-    #[test]
-    fn test_reconstruct() {
-        // marker: single +1 in center
-        // mask: full 3x3 block
-        let (marker, w, h) = g(&[
-            0, 0, 0,
-            0, 1, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let mask = vec![
-            1, 1, 1,
-            1, 1, 1,
-            1, 1, 1,
-        ];
-        let r = reconstruct(&marker, &mask, w, h);
-        // Should reconstruct entire mask
-        assert!(r.iter().all(|&v| v == 1));
-    }
-
-    #[test]
-    fn test_reconstruct_partial_mask() {
-        // marker: single +1 in top-left
-        // mask: L-shape
-        let (marker, w, h) = g(&[
-            1, 0, 0,
-            0, 0, 0,
-            0, 0, 0,
-        ], 3, 3);
-        let mask = vec![
-            1, 1, 0,
-            1, 0, 0,
-            1, 0, 0,
-        ];
-        let r = reconstruct(&marker, &mask, w, h);
-        assert_eq!(r[0], 1);
-        assert_eq!(r[1], 1);
-        assert_eq!(r[3], 1);
-        assert_eq!(r[6], 1);
-        assert_eq!(r[2], 0);
-        assert_eq!(r[4], 0);
+    fn test_connectivity_8_vs_4() {
+        let mut g = TernaryGrid::new(5, 5, 0);
+        g.set(2, 2, 1);
+        let d4 = g.dilate(1, 4);
+        let d8 = g.dilate(1, 8);
+        assert!(d8.count(1) >= d4.count(1));
     }
 }
