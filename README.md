@@ -1,75 +1,88 @@
 # ternary-morph
 
-**Ternary mathematical morphology: erosion, dilation, opening, closing, skeletonization, and gradient detection on three-valued grids.**
+**Mathematical morphology on ternary grids. The geometry of {-1, 0, +1} shapes.**
 
-## Background
+Mathematical morphology is the math of *shape*. You take a structuring element (a small probe shape) and slide it across your image/grid. Dilation expands shapes. Erosion shrinks them. Opening removes small protrusions. Closing fills small holes. The gradient finds boundaries. Hit-or-miss finds exact patterns. Reconstruction grows a seed until it hits a wall.
 
-Mathematical morphology — developed by Matheron and Serra at École des Mines de Paris in the 1960s — provides a rigorous framework for analyzing spatial structure in images and grids. Classical morphology operates on binary (foreground/background) or grayscale data. Ternary morphology extends this to three-state domains where the third state represents a qualitatively different category: not just "present" or "absent," but also "inhibited," "damaged," or "transitional."
+This crate implements all of that for ternary grids. The key insight: in ternary, morphology operates on *one* state at a time. Dilation expands +1 into non-+1 regions. Erosion removes +1 cells that lack full +1 neighborhoods. The -1 state is preserved — morphology doesn't destroy it, just grows or shrinks the +1 regions around it. This makes ternary morphology a *selective* operation: you shape the positive without touching the negative.
 
-In materials science, ternary grids arise naturally: +1 = intact, 0 = vacant, −1 = damaged. In cellular automata, three-state rules (like Brian's Brain) require morphological operations that respect the ternary structure. In ternary neural networks, activation maps are three-valued and morphological pooling can reduce spatial resolution while preserving structural information.
+The `reconstruct` function is the crown jewel: give it a marker (a seed) and a mask (a boundary), and it grows the seed until it exactly fills the masked region. No more, no less. This is connected component extraction, region growing, and flood fill — all in one operation.
 
-`ternary-morph` implements the full morphological toolkit — erosion, dilation, opening, closing, gradient, and skeletonization — on ternary grids with configurable connectivity (4-connected von Neumann or 8-connected Moore neighborhoods).
+## What's Inside
 
-## How It Works
+- **`se_3x3()`** — the standard 8-connected structuring element
+- **`dilation(grid, w, h, se)`** — expand +1 regions by one SE radius
+- **`erosion(grid, w, h, se)`** — shrink +1 regions by one SE radius
+- **`opening(grid, w, h, se)`** — erosion then dilation. Removes small +1 noise
+- **`closing(grid, w, h, se)`** — dilation then erosion. Fills small -1 holes
+- **`gradient(grid, w, h, se)`** — dilation minus erosion. The *boundary* of +1 regions
+- **`top_hat(grid, w, h, se)`** — original minus opening. Small bright features that disappear
+- **`black_hat(grid, w, h, se)`** — closing minus original. Small dark features that get filled
+- **`hit_or_miss(grid, w, h, fg_se, bg_se)`** — exact pattern matching with foreground/background SE
+- **`conditional_dilation(marker, mask, w, h, se)`** — dilate only where mask is +1
+- **`reconstruct(marker, mask, w, h)`** — iterative conditional dilation until stable. Flood fill
 
-### Ternary Grid
-
-The `TernaryGrid` stores values in {−1, 0, +1} on a 2D lattice:
+## Quick Example
 
 ```rust
-let mut grid = TernaryGrid::new(width, height, fill_value);
-grid.set(x, y, 1);  // +1 state
-grid.get(x, y);      // → 1
+use ternary_morph::*;
+
+let se = se_3x3();
+
+// A single +1 cell in a 5x5 grid
+let grid = vec![
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 0, 1, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+];
+
+// Dilation: +1 spreads to all 8 neighbors
+let dilated = dilation(&grid, 5, 5, &se);
+// 3x3 block of +1 centered at (2,2)
+
+// Erosion: the single +1 cell vanishes (not all neighbors are +1)
+let eroded = erosion(&grid, 5, 5, &se);
+// All zeros — isolated cells erode away
+
+// Opening removes isolated noise
+let opened = opening(&grid, 5, 5, &se);
+// All zeros — the single cell was noise
+
+// Reconstruction: grow a seed to fill a mask
+let marker = vec![0,0,0, 0,1,0, 0,0,0]; // seed at center
+let mask   = vec![1,1,1, 1,1,1, 1,1,1]; // allow entire 3x3
+let filled = reconstruct(&marker, &mask, 3, 3);
+// All +1 — the seed grew to fill the mask exactly
 ```
 
-### Morphological Operations
+## The Deeper Truth
 
-All operations target a specific ternary state (the `target` parameter):
+**Reconstruction is the most powerful operation.** All the others — dilation, erosion, opening, closing — are special cases or building blocks. Reconstruction does something unique: it's *idempotent* (running it again changes nothing) and *increasing* (it only adds +1, never removes). These properties make it a *morphological filter* — it preserves the topology of the mask while selecting regions connected to the marker. In image processing, this is how you extract individual objects from a binary image. In ternary, it's how you grow a seed population until it hits a barrier.
 
-- **Erosion** — A cell retains the target state only if *all* its neighbors share that state. Isolated cells are eroded to 0. This is the ternary analog of morphological shrinking.
-- **Dilation** — A cell acquires the target state if *any* neighbor has it. This expands regions of the target state into neighboring cells.
-- **Opening** (erode → dilate) — Removes small protrusions and noise while preserving the overall shape. Idempotent: `open(open(x)) = open(x)`.
-- **Closing** (dilate → erode) — Fills small holes and gaps while preserving the overall shape.
-- **Gradient** (dilate − erode) — Edge detection via the morphological gradient. Cells present in the dilated image but not in the eroded image form the boundary.
-- **Skeleton** — Iteratively erodes while preserving connectivity. Junction points (cells with >1 target-state neighbor) are retained to maintain topological structure.
+The `no_std` implementation (using `alloc`) means this runs on embedded systems. The ternary constraint means every intermediate result is a valid ternary grid — no floating-point, no approximation, no rounding errors. The morphology is *exact*.
 
-### Connectivity
+**Use cases:**
+- **Image processing** — ternary image segmentation, boundary detection, noise removal
+- **Spatial analysis** — region growing on discrete maps
+- **Game AI** — compute influence regions, fog of war, territory control
+- **Document analysis** — ternary OCR (text/background/margin)
+- **Embedded vision** — `no_std` morphology on microcontrollers
 
-- **4-connected** (von Neumann): up, down, left, right — 4 neighbors.
-- **8-connected** (Moore): includes diagonals — 8 neighbors.
+## See Also
 
-The connectivity parameter controls the aggressiveness of erosion/dilation. 8-connected dilation expands faster; 4-connected erosion is more conservative.
+- **ternary-field** — gradient and Laplacian (continuous approach to the same problems)
+- **ternary-lattice** — order theory underlying morphological operations
+- **ternary-diff** — diff operations on ternary grids
+- **ternary-shield** — containment (related to constrained dilation)
 
-## Experimental Results
+## Install
 
-The test suite verifies:
-- **Erosion removes isolated cells**: A single +1 in a 5×5 grid of 0s erodes to nothing.
-- **Dilation expands**: A single +1 dilates to its 4 or 8 neighbors.
-- **Opening removes noise**: A 3×3 block is preserved; an isolated pixel at (0,0) is removed.
-- **Closing fills holes**: A single 0 in a 5×5 grid of +1s is filled.
-- **Gradient detects edges**: A horizontal line of +1s produces edge cells at the boundary.
-- **Skeleton reduces**: A cross shape skeletonizes to a thinner structure without disconnecting.
-- **Idempotent opening**: `open(open(x)) = open(x)` — proven by test on a 3×3 block.
-- **Negative state support**: Dilation with target = −1 works identically to +1.
-- **Connectivity comparison**: 8-connected dilation expands more than 4-connected.
+```bash
+cargo add ternary-morph
+```
 
-## Impact
+## License
 
-Ternary morphology opens up image processing and spatial analysis for three-valued data. Rather than thresholding to binary and losing information, or treating ternary as grayscale and getting nonsensical results, `ternary-morph` respects the categorical nature of ternary states. The skeletonization algorithm is particularly notable: it preserves connectivity through junction detection, enabling topological analysis of ternary structures.
-
-## Use Cases
-
-1. **Materials Defect Analysis** — Use erosion to identify isolated damage sites, opening to remove noise from radiation damage maps (see `ternary-irradiate`), and skeletonization to trace damage networks.
-2. **Ternary Image Processing** — Apply morphological pooling to ternary activation maps in neural networks. Opening removes sparse activations; closing fills gaps in dense regions.
-3. **Cellular Automata Post-Processing** — After running a three-state CA (e.g., Brian's Brain), use morphological gradient to identify wavefronts and skeletonization to trace stable structures.
-4. **Spatial Ternary Logic** — Combine morphological operations with ternary logic to build spatial reasoning systems: "erode the positive region, then check if any negative region remains connected."
-
-## Open Questions
-
-1. **Grayscale extension** — Can these operations be generalized to balanced ternary with multiple digits (e.g., values in {−3, −2, −1, 0, 1, 2, 3})?
-2. **3D morphology** — The current implementation is 2D. Materials simulations often require 3D lattice morphology. Would the same algorithms extend naturally?
-3. **Structuring elements** — Currently uses the default von Neumann/Moore neighborhoods. Arbitrary structuring elements would enable directionally-biased morphology.
-
-## Connection to Oxide Stack
-
-`ternary-morph` operates on the `TernaryGrid` abstraction from `ternary-core` and produces outputs consumable by `ternary-irradiate` (defect boundary detection), `ternary-signals` (spatial frequency analysis of morphological results), and `ternary-walk` (random walks on skeletonized structures). It is the spatial processing layer: where ternary data has geometric structure, `ternary-morph` provides the tools to analyze and transform it.
+MIT
